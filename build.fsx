@@ -32,12 +32,11 @@ let project = "Thespian"
 let summary = "An F# Actor Framework"
 
 // File system information 
-// (<solutionFile>.sln is built during the building process)
-let solutionFile  = "Thespian"
+let solutionFile  = "Thespian.sln"
 
 // Pattern specifying assemblies to be tested using NUnit
 // NOTE : No need to specify different directories.
-let testAssemblies = [ "bin/Thespian.Tests.dll"; "bin/Thespian.Cluster.Tests.dll" ]
+let testProjects = [ "tests/Thespian.Tests" ]
 
 let gitOwner = "mbraceproject"
 // Git configuration (used for publishing documentation in gh-pages branch)
@@ -45,6 +44,11 @@ let gitOwner = "mbraceproject"
 let gitHome = "https://github.com/" + gitOwner
 // The name of the project on GitHub
 let gitName = "Thespian"
+
+let configuration = "Release"
+let netcoreappTarget = "netcoreapp3.1"
+
+let artifactsDir = __SOURCE_DIRECTORY__ @@ "artifacts"
 
 // --------------------------------------------------------------------------------------
 // END TODO: The rest of the file includes standard build steps 
@@ -61,55 +65,39 @@ Target "AssemblyInfo" (fun _ ->
         Attribute.Product project
         Attribute.Description summary
         Attribute.Version release.AssemblyVersion
-        Attribute.FileVersion release.AssemblyVersion ] 
-
-  CreateFSharpAssemblyInfo "src/Thespian.Cluster/AssemblyInfo.fs"
-      [ Attribute.Title "Thespian.Cluster"
-        Attribute.Product "Thespian.Cluster"
-        Attribute.Description summary
-        Attribute.Version release.AssemblyVersion
-        Attribute.FileVersion release.AssemblyVersion ] 
+        Attribute.FileVersion release.AssemblyVersion ]
 )
 
 // --------------------------------------------------------------------------------------
 // Clean build results & restore NuGet packages
 
-Target "RestorePackages" RestorePackages
-
 Target "Clean" (fun _ ->
-    CleanDirs ["bin"; "temp"]
-)
-
-Target "CleanDocs" (fun _ ->
-    CleanDirs ["docs/output"]
+    CleanDirs [artifactsDir]
 )
 
 // --------------------------------------------------------------------------------------
 // Build library & test project
 
 Target "Build" (fun _ ->
-    !! (solutionFile + "*.sln")
-    |> MSBuildRelease "" "Rebuild"
-    |> ignore
-)
-
-Target "DebugBuild" (fun _ ->
-    !! (solutionFile + "*.sln")
-    |> MSBuildDebug "" "Build"
-    |> ignore
+    DotNetCli.Build (fun c ->
+        { c with
+            Project = solutionFile
+            Configuration = configuration })
 )
 
 // --------------------------------------------------------------------------------------
 // Run the unit tests using test runner
 
 Target "RunTests" (fun _ ->
-    testAssemblies 
-    |> NUnit (fun p ->
-        { p with
-            Framework = "v4.0.30319"
-            DisableShadowCopy = true
-            TimeOut = TimeSpan.FromMinutes 60.
-            OutputFile = "TestResults.xml" })
+    for proj in testProjects do
+        DotNetCli.Test (fun p ->
+            { p with
+                Project = proj
+#if MONO
+                Framework = netcoreappTarget
+#endif
+                Configuration = configuration
+                AdditionalArgs = ["--no-build"] })
 )
 
 //
@@ -117,29 +105,37 @@ Target "RunTests" (fun _ ->
 //// Build a NuGet package
 
 Target "NuGet" (fun _ ->    
-    Paket.Pack (fun p -> 
-        { p with 
-            ToolPath = ".paket/paket.exe" 
-            OutputPath = "bin/"
-            Version = release.NugetVersion
-            ReleaseNotes = toLines release.Notes })
+    DotNetCli.Pack (fun p ->
+        { p with
+            OutputPath = artifactsDir
+            Configuration = configuration
+            Project = "src/Thespian"
+            AdditionalArgs =
+                [ sprintf "-p:PackageVersion=%s" release.NugetVersion
+                  sprintf "-p:PackageReleaseNotes=\"%s\"" (String.concat Environment.NewLine release.Notes) ]
+        })
 )
 
 Target "NuGetPush" (fun _ -> 
     Paket.Push (fun p -> 
         { p with 
             PublishUrl = "https://www.nuget.org"
-            WorkingDir = "bin/" }))
-
-// --------------------------------------------------------------------------------------
-// Generate the documentation
-
-Target "GenerateDocs" (fun _ ->
-    executeFSIWithArgs "docs/tools" "generate.fsx" ["--define:RELEASE"] [] |> ignore
-)
+            WorkingDir = artifactsDir }))
 
 // --------------------------------------------------------------------------------------
 // Release Scripts
+
+Target "GenerateDocs" (fun _ ->
+    let path = __SOURCE_DIRECTORY__ @@ "packages/build/FSharp.Compiler.Tools/tools/fsi.exe"
+    let workingDir = "docs/tools"
+    let args = "--define:RELEASE generate.fsx"
+    let command, args = 
+        if EnvironmentHelper.isMono then "mono", sprintf "'%s' %s" path args 
+        else path, args
+
+    if Shell.Exec(command, args, workingDir) <> 0 then
+        failwith "failed to generate docs"
+)
 
 Target "ReleaseDocs" (fun _ ->
     let tempDocsDir = "temp/gh-pages"
@@ -155,6 +151,7 @@ Target "ReleaseDocs" (fun _ ->
 
 // Github Releases
 
+#nowarn "85"
 #load "paket-files/build/fsharp/FAKE/modules/Octokit/Octokit.fsx"
 open Octokit
 
@@ -200,19 +197,21 @@ Target "ReleaseGitHub" (fun _ ->
 Target "Default" DoNothing
 Target "Release" DoNothing
 Target "Debug" DoNothing
+Target "Bundle" DoNothing
 
 "Clean"
-  ==> "RestorePackages"
   ==> "AssemblyInfo"
   ==> "Build"
   ==> "RunTests"
   ==> "Default"
 
-"Build"
-  ==> "CleanDocs"
-  ==> "GenerateDocs"
-  ==> "ReleaseDocs"
+"Default"
   ==> "NuGet"
+  ==> "GenerateDocs"
+  ==> "Bundle"
+
+"Bundle"
+  ==> "ReleaseDocs"
   ==> "NuGetPush"
   ==> "ReleaseGitHub"
   ==> "Release"
